@@ -33,7 +33,7 @@ parser.add_argument('--bptt', type=int, default=35,
                     help='sequence length')
 parser.add_argument('--dropout', type=float, default=0.2,
                     help='dropout applied to layers (0 = no dropout)')
-parser.add_argument('--tied', action='store_true',
+parser.add_argument('--tied', action='store_true', #TODO default
                     help='tie the word embedding and softmax weights')
 parser.add_argument('--seed', type=int, default=1111,
                     help='random seed')
@@ -136,8 +136,8 @@ def get_batch(source, i, pad_start=False):
     seq_len = min(args.bptt, len(source) - 1 - i)
     data = source[i:i+seq_len]  # not predicting the first token in batch
     if pad_start and args.norder > 1: 
-        padding = torch.ones(args.norder-1, source.size()[1], dtype=torch.long)*pad_id
-        data = torch.cat((padding.to(device), data), dim=0)
+        padding = torch.ones(args.norder-1, source.size()[1], dtype=torch.long).to(device)*pad_id
+        data = torch.cat((padding, data), dim=0)
     target = source[i+1:i+1+seq_len].view(-1)
     return data, target
 

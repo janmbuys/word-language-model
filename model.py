@@ -72,9 +72,9 @@ class FeedForwardModel(nn.Module):
         self.nonlin = nn.Tanh()
         self.encoder = nn.Embedding(ntoken, ninp)
 
-        self.ff = [nn.Linear(ninp, nhid*norder)]
-        for i in range(1, nlayers):
-            self.ff.append(nn.Linear(nhid, nhid))
+        self.ff_first = nn.Linear(ninp, nhid*norder) 
+        if nlayers > 1:
+            self.ff_rest = nn.ModuleList([nn.Linear(nhid, nhid) for i in range(1, nlayers)])
 
         self.decoder = nn.Linear(nhid, ntoken)
 
@@ -90,11 +90,13 @@ class FeedForwardModel(nn.Module):
         self.nhid = nhid
         self.nlayers = nlayers
 
+
     def init_weights(self):
         initrange = 0.1
         nn.init.uniform_(self.encoder.weight, -initrange, initrange)
-        nn.init.zeros_(self.decoder.weight)
+        nn.init.zeros_(self.decoder.bias)
         nn.init.uniform_(self.decoder.weight, -initrange, initrange)
+
 
     def forward(self, inp):
         batch_size = inp.size()[1]
@@ -102,14 +104,15 @@ class FeedForwardModel(nn.Module):
         emb = self.drop(self.encoder(inp)) # input_length x batch_size x ninp
 
         # Compute the first hidden layer efficiently
-        ff_output = self.ff[0](emb).view(inp_length, batch_size, self.norder, self.nhid)
-        output = ff_output[self.norder-1:,:,0,:] # input_length x batch_size x nhid
-        for j in range(1, self.norder): # shift positions for higher orders
-            output += ff_output[self.norder-j-1:inp_length-j,:,j,:]
+        first_output = self.ff_first(emb).view(inp_length, batch_size, self.norder, self.nhid)
+        output = first_output[self.norder-1:,:,0,:] # input_length x batch_size x nhid
+        for j in range(1, self.norder): # shift positions for higher order contexts
+            output += first_output[self.norder-j-1:inp_length-j,:,j,:]
         output = self.drop(self.nonlin(output))
 
-        for i in range(1, self.nlayers):
-            output = self.drop(self.nonlin(self.ff[i](output)))
+	# Higher hidden layers
+        for i in range(self.nlayers-1):
+            output = self.drop(self.nonlin(self.ff_rest[i](output)))
         
         decoded = self.decoder(output)
         decoded = decoded.view(-1, self.ntoken)
