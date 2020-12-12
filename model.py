@@ -69,7 +69,7 @@ class FeedForwardModel(nn.Module):
         super(FeedForwardModel, self).__init__()
         self.ntoken = ntoken
         self.drop = nn.Dropout(dropout)
-        self.nonlin = nn.Tanh()
+        self.nonlin = nn.ReLU()
         self.encoder = nn.Embedding(ntoken, ninp)
 
         self.ff_first = nn.Linear(ninp, nhid*norder) 
@@ -83,19 +83,24 @@ class FeedForwardModel(nn.Module):
                 raise ValueError('When using the tied flag, nhid must be equal to emsize')
             self.decoder.weight = self.encoder.weight
 
-        self.init_weights()
-
         self.norder = norder
         self.ninp = ninp
         self.nhid = nhid
         self.nlayers = nlayers
 
+        self.init_weights()
+
 
     def init_weights(self):
-        initrange = 0.1
-        nn.init.uniform_(self.encoder.weight, -initrange, initrange)
-        nn.init.zeros_(self.decoder.bias)
-        nn.init.uniform_(self.decoder.weight, -initrange, initrange)
+        nn.init.kaiming_uniform_(self.encoder.weight)
+        nn.init.kaiming_uniform_(self.decoder.weight)
+        nn.init.kaiming_uniform_(self.ff_first.weight)
+
+        def _init_list_weights(m):
+            if isinstance(m, nn.Linear): 
+                nn.init.kaiming_uniform_(m.weight)
+
+        self.ff_rest.apply(_init_list_weights)
 
 
     def forward(self, inp):
@@ -110,7 +115,7 @@ class FeedForwardModel(nn.Module):
             output += first_output[self.norder-j-1:inp_length-j,:,j,:]
         output = self.drop(self.nonlin(output))
 
-	# Higher hidden layers
+        # Higher hidden layers
         for i in range(self.nlayers-1):
             output = self.drop(self.nonlin(self.ff_rest[i](output)))
         

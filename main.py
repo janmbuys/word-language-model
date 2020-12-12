@@ -13,41 +13,50 @@ import model
 parser = argparse.ArgumentParser(description='PyTorch Wikitext-2 RNN/LSTM/GRU/Transformer Language Model')
 parser.add_argument('--data', type=str, default='./data/wikitext-2',
                     help='location of the data corpus')
-parser.add_argument('--model', type=str, default='LSTM',
+
+parser.add_argument('--model', type=str, default='FeedForward',
                     help='type of net (FeedForward, RNN_TANH, RNN_RELU, LSTM, GRU, Transformer)')
-parser.add_argument('--emsize', type=int, default=200,
+parser.add_argument('--norder', type=int, default=4,
+                    help='context size in feed-forward model; the number of heads in the transformer model')
+parser.add_argument('--emsize', type=int, default=256,
                     help='size of word embeddings')
-parser.add_argument('--nhid', type=int, default=200,
+parser.add_argument('--nhid', type=int, default=256,
                     help='number of hidden units per layer')
 parser.add_argument('--nlayers', type=int, default=2,
                     help='number of layers')
-parser.add_argument('--lr', type=float, default=20,
+parser.add_argument('--dropout', type=float, default=0.3,
+                    help='dropout applied to layers (0 = no dropout)')
+parser.add_argument('--not-tied', action='store_true', 
+                    help='do not tie the word embedding and softmax weights')
+
+parser.add_argument('--optim', type=str, default='adamw',
+                    help='adamw|sgd')
+parser.add_argument('--lr', type=float, default=1e-3, 
                     help='initial learning rate')
 parser.add_argument('--clip', type=float, default=0.25,
                     help='gradient clipping')
-parser.add_argument('--epochs', type=int, default=40,
+parser.add_argument('--lr-decay-rate', type=float, default=4.0,
+                    help='learning rate decay per epoch')
+parser.add_argument('--weight-decay', type=float, default=1e-2,
+                    help='l2 weight decay for adam and variants')
+
+parser.add_argument('--epochs', type=int, default=100,
                     help='upper epoch limit')
-parser.add_argument('--batch_size', type=int, default=20, metavar='N',
+parser.add_argument('--batch_size', type=int, default=128, metavar='N',
                     help='batch size')
-parser.add_argument('--bptt', type=int, default=35,
+parser.add_argument('--bptt', type=int, default=64,
                     help='sequence length')
-parser.add_argument('--dropout', type=float, default=0.2,
-                    help='dropout applied to layers (0 = no dropout)')
-parser.add_argument('--tied', action='store_true', #TODO default
-                    help='tie the word embedding and softmax weights')
+
 parser.add_argument('--seed', type=int, default=1111,
                     help='random seed')
 parser.add_argument('--cuda', action='store_true',
                     help='use CUDA')
-parser.add_argument('--log-interval', type=int, default=200, metavar='N',
+parser.add_argument('--log-interval', type=int, default=0, metavar='N',
                     help='report interval')
 parser.add_argument('--save', type=str, default='model.pt',
                     help='path to save the final model')
 parser.add_argument('--onnx-export', type=str, default='',
                     help='path to export the final model in onnx format')
-
-parser.add_argument('--norder', type=int, default=2,
-                    help='context size in feed-forward model; the number of heads in the transformer model')
 parser.add_argument('--dry-run', action='store_true',
                     help='verify the code and the model')
 
@@ -101,11 +110,11 @@ test_data = batchify(corpus.test, eval_batch_size)
 
 ntokens = len(corpus.dictionary)
 if args.model == 'FeedForward':
-    model = model.FeedForwardModel(args.norder, ntokens, args.emsize, args.nhid, args.nlayers, args.dropout, args.tied).to(device)
+    model = model.FeedForwardModel(args.norder, ntokens, args.emsize, args.nhid, args.nlayers, args.dropout, not args.not_tied).to(device)
 elif args.model == 'Transformer':
     model = model.TransformerModel(ntokens, args.emsize, args.norder, args.nhid, args.nlayers, args.dropout).to(device)
 else:
-    model = model.RNNModel(args.model, ntokens, args.emsize, args.nhid, args.nlayers, args.dropout, args.tied).to(device)
+    model = model.RNNModel(args.model, ntokens, args.emsize, args.nhid, args.nlayers, args.dropout, not args.not_tied).to(device)
 
 criterion = nn.NLLLoss()
 
@@ -170,7 +179,7 @@ def train():
     ntokens = len(corpus.dictionary)
     if not (args.model == 'Transformer' or args.model == 'FeedForward'):
         hidden = model.init_hidden(args.batch_size)
-    print("Start Training")
+    print('Start Training')
     for batch, i in enumerate(range(0, train_data.size(0) - 1, args.bptt)):
         data, targets = get_batch(train_data, i, args.model == 'FeedForward')
         # Starting each batch, we detach the hidden state from how it was previously produced.
@@ -186,13 +195,17 @@ def train():
         loss.backward()
 
         # `clip_grad_norm` helps prevent the exploding gradient problem in RNNs / LSTMs.
-        torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip)
-        for p in model.parameters():
-            p.data.add_(p.grad, alpha=-lr)
+        if args.clip > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip)
+        if args.optim == 'sgd':
+            for p in model.parameters():
+                p.data.add_(p.grad, alpha=-lr)
+        else:
+            optimizer.step()
 
         total_loss += loss.item()
 
-        if batch % args.log_interval == 0 and batch > 0:
+        if args.log_interval > 0 and batch > 0 and batch % args.log_interval == 0:
             cur_loss = total_loss / args.log_interval
             elapsed = time.time() - start_time
             print('| epoch {:3d} | {:5d}/{:5d} batches | lr {:02.2f} | ms/batch {:5.2f} | '
@@ -216,7 +229,14 @@ def export_onnx(path, batch_size, seq_len):
 
 # Loop over epochs.
 lr = args.lr
+
+if args.optim == 'adamw':
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=args.weight_decay)
+else:
+    assert args.optim == 'sgd', 'Specified optimizer not supported'
+
 best_val_loss = None
+previous_epoch_improved = True
 
 # At any point you can hit Ctrl + C to break out of training early.
 try:
@@ -235,8 +255,19 @@ try:
                 torch.save(model, f)
             best_val_loss = val_loss
         else:
-            # Anneal the learning rate if no improvement has been seen in the validation dataset.
-            lr /= 4.0
+            if previous_epoch_improved == False:
+                # Anneal the learning rate if no improvement has been seen in the validation dataset.
+                lr /= args.lr_decay_rate
+                print("Decay LR to %.6f" % lr)
+                previous_epoch_improved = True # reset check
+            else:
+                previous_epoch_improved = False
+
+        if args.optim != 'sgd':
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = lr
+
+
 except KeyboardInterrupt:
     print('-' * 89)
     print('Exiting from training early')
