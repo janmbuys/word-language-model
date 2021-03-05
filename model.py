@@ -62,22 +62,27 @@ class RNNModel(nn.Module):
             return weight.new_zeros(self.nlayers, bsz, self.nhid)
 
 
-class FeedForwardModel(nn.Module):
-    """Container module with an encoder, a feed forward module, and a decoder."""
+class FeedForwardConvModel(nn.Module):
+    """Container module with an encoder, a feed forward module (first layer implemented as a convolution), and a decoder. Based on code by Justin Chiu: https://github.com/justinchiu/hmm-lm/blob/d2fa59446054132184da98054551f8426558f4d6/models/fflm.py
+     """
 
     def __init__(self, norder, ntoken, ninp, nhid, nlayers, dropout=0.5, tie_weights=False):
-        super(FeedForwardModel, self).__init__()
+        super(FeedForwardConvModel, self).__init__()
         self.ntoken = ntoken
         self.drop = nn.Dropout(dropout)
-        self.nonlin = nn.ReLU()
-        self.encoder = nn.Embedding(ntoken, ninp)
+        self.encoder = nn.Embedding(num_embeddings = ntoken, embedding_dim = ninp)
 
-        self.ff_first = nn.Linear(ninp, nhid*norder) 
+        self.cnn = nn.Conv1d(in_channels = ninp, out_channels = nhid, kernel_size = norder)
+
+        m = []
+        for i in range(nlayers-1):
+            m.append(nn.Linear(nhid, nhid))
+            m.append(nn.ReLU())
+            m.append(nn.Dropout(dropout))
         if nlayers > 1:
-            self.ff_rest = nn.ModuleList([nn.Linear(nhid, nhid) for i in range(1, nlayers)])
+            self.mlp = nn.Sequential(*m)
 
         self.decoder = nn.Linear(nhid, ntoken)
-
         if tie_weights:
             if nhid != ninp:
                 raise ValueError('When using the tied flag, nhid must be equal to emsize')
@@ -94,13 +99,75 @@ class FeedForwardModel(nn.Module):
     def init_weights(self):
         nn.init.kaiming_uniform_(self.encoder.weight)
         nn.init.kaiming_uniform_(self.decoder.weight)
-        nn.init.kaiming_uniform_(self.ff_first.weight)
+        nn.init.kaiming_uniform_(self.cnn.weight)
 
         def _init_list_weights(m):
             if isinstance(m, nn.Linear): 
                 nn.init.kaiming_uniform_(m.weight)
 
-        self.ff_rest.apply(_init_list_weights)
+        if self.nlayers > 1:
+            self.mlp.apply(_init_list_weights)
+
+
+    def forward(self, inputs):
+        emb = self.drop(self.encoder(inputs)) # input_length x batch_size x ninp
+
+        emb_T = emb.transpose(0, 1).transpose(1, 2) 
+        cnn_output = self.cnn(emb_T).relu().transpose(1, 2) # batch_size x output_length x nhid
+
+        mlp_output = self.mlp(self.drop(cnn_output))
+
+        logits = torch.einsum(
+            "nth,vh->tnv",
+            mlp_output,
+            self.decoder.weight)
+        return logits.view(-1, self.ntoken).log_softmax(-1)
+
+
+class FeedForwardModel(nn.Module):
+    """Container module with an encoder, a feed forward module, and a decoder."""
+
+    def __init__(self, norder, ntoken, ninp, nhid, nlayers, dropout=0.5, tie_weights=False):
+        super(FeedForwardModel, self).__init__()
+        self.ntoken = ntoken
+        self.drop = nn.Dropout(dropout)
+        self.encoder = nn.Embedding(num_embeddings = ntoken, embedding_dim = ninp)
+
+        self.cnn = nn.Linear(ninp, nhid*norder) 
+
+        m = []
+        for i in range(nlayers-1):
+            m.append(nn.Linear(nhid, nhid))
+            m.append(nn.ReLU())
+            m.append(nn.Dropout(dropout))
+        if nlayers > 1:
+            self.mlp = nn.Sequential(*m)
+
+        self.decoder = nn.Linear(nhid, ntoken)
+        if tie_weights:
+            if nhid != ninp:
+                raise ValueError('When using the tied flag, nhid must be equal to emsize')
+            self.decoder.weight = self.encoder.weight
+
+        self.norder = norder
+        self.ninp = ninp
+        self.nhid = nhid
+        self.nlayers = nlayers
+
+        self.init_weights()
+
+
+    def init_weights(self):
+        nn.init.kaiming_uniform_(self.encoder.weight)
+        nn.init.kaiming_uniform_(self.decoder.weight)
+        nn.init.kaiming_uniform_(self.cnn.weight)
+
+        def _init_list_weights(m):
+            if isinstance(m, nn.Linear): 
+                nn.init.kaiming_uniform_(m.weight)
+
+        if self.nlayers > 1:
+            self.mlp.apply(_init_list_weights)
 
 
     def forward(self, inp):
@@ -108,21 +175,16 @@ class FeedForwardModel(nn.Module):
         inp_length = inp.size()[0]
         emb = self.drop(self.encoder(inp)) # input_length x batch_size x ninp
 
-        # Compute the first hidden layer efficiently
-        first_output = self.ff_first(emb).view(inp_length, batch_size, self.norder, self.nhid)
-        output = first_output[self.norder-1:,:,0,:] # input_length x batch_size x nhid
+        first_output = self.cnn(emb).view(inp_length, batch_size, self.norder, self.nhid)
+        cnn_output = first_output[self.norder-1:,:,0,:] # input_length x batch_size x nhid
         for j in range(1, self.norder): # shift positions for higher order contexts
-            output += first_output[self.norder-j-1:inp_length-j,:,j,:]
-        output = self.drop(self.nonlin(output))
+            cnn_output += first_output[self.norder-j-1:inp_length-j,:,j,:]
+        cnn_output = self.drop(cnn_output.relu())
 
-        # Higher hidden layers
-        for i in range(self.nlayers-1):
-            output = self.drop(self.nonlin(self.ff_rest[i](output)))
-        
-        decoded = self.decoder(output)
-        decoded = decoded.view(-1, self.ntoken)
+        mlp_output = self.mlp(cnn_output)
 
-        return F.log_softmax(decoded, dim=1)
+        logits = self.decoder(mlp_output)
+        return logits.view(-1, self.ntoken).log_softmax(-1)
 
 
 # Temporarily leave PositionalEncoding module here. Will be moved somewhere else.
