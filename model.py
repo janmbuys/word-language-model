@@ -62,12 +62,12 @@ class RNNModel(nn.Module):
             return weight.new_zeros(self.nlayers, bsz, self.nhid)
 
 
-class FeedForwardConvModel(nn.Module):
+class FeedForwardModel2(nn.Module):
     """Container module with an encoder, a feed forward module (first layer implemented as a convolution), and a decoder. Based on code by Justin Chiu: https://github.com/justinchiu/hmm-lm/blob/d2fa59446054132184da98054551f8426558f4d6/models/fflm.py
      """
 
     def __init__(self, norder, ntoken, ninp, nhid, nlayers, dropout=0.5, tie_weights=False):
-        super(FeedForwardConvModel, self).__init__()
+        super(FeedForwardModel2, self).__init__()
         self.ntoken = ntoken
         self.drop = nn.Dropout(dropout)
         self.encoder = nn.Embedding(num_embeddings = ntoken, embedding_dim = ninp)

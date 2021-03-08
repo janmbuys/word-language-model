@@ -15,7 +15,7 @@ parser.add_argument('--data', type=str, default='./data/wikitext-2',
                     help='location of the data corpus')
 
 parser.add_argument('--model', type=str, default='FeedForward',
-                    help='type of net (FeedForward, FeedForwardConv, RNN_TANH, RNN_RELU, LSTM, GRU, Transformer)')
+                    help='type of net (FeedForward, FeedForward2, RNN_TANH, RNN_RELU, LSTM, GRU, Transformer)')
 parser.add_argument('--norder', type=int, default=4,
                     help='context size in feed-forward model; the number of heads in the transformer model')
 parser.add_argument('--emsize', type=int, default=256,
@@ -29,7 +29,7 @@ parser.add_argument('--dropout', type=float, default=0.3,
 parser.add_argument('--not-tied', action='store_true', 
                     help='do not tie the word embedding and softmax weights')
 parser.add_argument('--pad-vocab', action='store_true', 
-                    help='Add new padding symbols to the vocab')
+                    help='Add new padding symbols to the vocab for each n-gram context position')
 
 parser.add_argument('--optim', type=str, default='adamw',
                     help='adamw|sgd')
@@ -44,12 +44,16 @@ parser.add_argument('--weight-decay', type=float, default=1e-2,
 
 parser.add_argument('--epochs', type=int, default=100,
                     help='upper epoch limit')
-parser.add_argument('--batch_size', type=int, default=128, metavar='N',
+parser.add_argument('--batch-size', type=int, default=128, metavar='N',
                     help='batch size')
+parser.add_argument('--eval-batch-size', type=int, default=128, metavar='N',
+                    help='evaluation batch size')
 parser.add_argument('--bptt', type=int, default=64,
                     help='sequence length')
 parser.add_argument('--patience', type=int, default=8,
-                    help='patience for learning rate decay')
+                    help='patience for learning rate decay based on eval interval')
+parser.add_argument('--train-eval-interval', type=int, default=4,
+                    help='How many times per epoch to evaluate')
 
 parser.add_argument('--seed', type=int, default=1111,
                     help='random seed')
@@ -102,11 +106,9 @@ def batchify(data, bsz):
     data = data.view(bsz, -1).t().contiguous()
     return data.to(device)
 
-eval_batch_size = 10
-
 train_data = batchify(corpus.train, args.batch_size)
-val_data = batchify(corpus.valid, eval_batch_size)
-test_data = batchify(corpus.test, eval_batch_size)
+val_data = batchify(corpus.valid, args.eval_batch_size)
+test_data = batchify(corpus.test, args.eval_batch_size)
 
 ###############################################################################
 # Build the model
@@ -116,8 +118,8 @@ ntokens = len(corpus.dictionary) + args.norder if args.pad_vocab else len(corpus
 
 if args.model == 'FeedForward':
     model = model.FeedForwardModel(args.norder, ntokens, args.emsize, args.nhid, args.nlayers, args.dropout, not args.not_tied).to(device)
-elif args.model == 'FeedForwardConv':
-    model = model.FeedForwardConvModel(args.norder, ntokens, args.emsize, args.nhid, args.nlayers, args.dropout, not args.not_tied).to(device)
+elif args.model == 'FeedForward2':
+    model = model.FeedForwardModel2(args.norder, ntokens, args.emsize, args.nhid, args.nlayers, args.dropout, not args.not_tied).to(device)
 elif args.model == 'Transformer':
     model = model.TransformerModel(ntokens, args.emsize, args.norder, args.nhid, args.nlayers, args.dropout).to(device)
 else:
@@ -164,12 +166,6 @@ def get_batch(source, i, ntokens, pad_start=False):
         data = source[i:i+seq_len]  # not predicting the first token in batch
         target = source[i+1:i+1+seq_len].view(-1)
 
-    # prev code
-    #data = source[i:i+seq_len]  # not predicting the first token in batch
-    #if pad_start and args.norder > 1: 
-    #    padding = torch.ones(args.norder-1, source.size()[1], dtype=torch.long).to(device)*pad_id
-    #    data = torch.cat((padding, data), dim=0)
-    #target = source[i+1:i+1+seq_len].view(-1)
     return data, target
 
 
@@ -180,7 +176,7 @@ def evaluate(data_source):
 
     ntokens = len(corpus.dictionary) + args.norder if args.pad_vocab else len(corpus.dictionary)
     if not (args.model == 'Transformer' or args.model.startswith('FeedForward')):
-        hidden = model.init_hidden(eval_batch_size)
+        hidden = model.init_hidden(args.eval_batch_size)
     with torch.no_grad():
         for i in range(0, data_source.size(0) - 1, args.bptt):
             data, targets = get_batch(data_source, i, ntokens, args.model.startswith('FeedForward'))
@@ -262,14 +258,15 @@ else:
 best_val_loss = None
 patience_count = 0
 
-train_frac = int(train_data.size(0)/4)
-train_intervals = [0, train_frac, 2*train_frac, 3*train_frac, train_data.size(0) -1] 
+train_frac = int(train_data.size(0)/args.train_eval_interval)
+train_intervals = [train_frac*i for i in range(args.train_eval_interval)] 
+train_intervals.append(train_data.size(0) -1)
 
 # At any point you can hit Ctrl + C to break out of training early.
 try:
     for epoch in range(1, args.epochs+1):
         epoch_start_time = time.time()
-        for i in range(4):
+        for i in range(args.train_eval_interval):
             train(train_intervals[i], train_intervals[i+1])
             val_loss = evaluate(val_data)
             print('-' * 89)
