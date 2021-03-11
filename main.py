@@ -46,7 +46,7 @@ parser.add_argument('--epochs', type=int, default=100,
                     help='upper epoch limit')
 parser.add_argument('--batch-size', type=int, default=128, metavar='N',
                     help='batch size')
-parser.add_argument('--eval-batch-size', type=int, default=128, metavar='N',
+parser.add_argument('--eval-batch-size', type=int, default=64, metavar='N',
                     help='evaluation batch size')
 parser.add_argument('--bptt', type=int, default=64,
                     help='sequence length')
@@ -100,10 +100,16 @@ pad_id = corpus.dictionary.word2idx['<eos>']
 def batchify(data, bsz):
     # Work out how cleanly we can divide the dataset into bsz parts.
     nbatch = data.size(0) // bsz
+    print(data.size(0)  - nbatch * bsz)
     # Trim off any extra elements that wouldn't cleanly fit (remainders).
     data = data.narrow(0, 0, nbatch * bsz)
     # Evenly divide the data across the bsz batches.
-    data = data.view(bsz, -1).t().contiguous()
+    data = data.view(bsz, -1).t().contiguous() # length x batch_size
+    if args.model.startswith('FeedForward'):
+        prepend = data[-args.norder:,:-1]
+        padding = torch.ones(args.norder, 1, dtype=torch.long)*pad_id
+        prepend = torch.cat((padding, prepend), dim=1)
+        data = torch.cat((prepend, data), dim=0)
     return data.to(device)
 
 train_data = batchify(corpus.train, args.batch_size)
@@ -153,14 +159,21 @@ def repackage_hidden(h):
 def get_batch(source, i, ntokens, pad_start=False):
     if pad_start:
         seq_len = min(args.bptt, len(source) - i)
-        data = source[i:i+seq_len-1]
-        if args.pad_vocab:
-            prefix = torch.LongTensor([i for i in range(ntokens-args.norder, ntokens)]).to(device)
-            padding = prefix.unsqueeze(1).expand(args.norder, source.size()[1])
-        else:
-            padding = torch.ones(args.norder, source.size()[1], dtype=torch.long).to(device)*pad_id
-        data = torch.cat((padding, data), dim=0)
-        target = source[i:i+seq_len].view(-1) # predict first token as well
+        if i > args.norder:
+            data = source[i-args.norder:i+seq_len-1]
+            target = source[i:i+seq_len].view(-1) # predict first token as well
+        else: #elif i == 0:
+            data = source[i:i+seq_len-1]
+            target = source[i+args.norder:i+seq_len].view(-1) # predict first token as well
+        if False: # else:
+            data = source[i:i+seq_len-1]
+            if args.pad_vocab:
+                prefix = torch.LongTensor([i for i in range(ntokens-args.norder, ntokens)]).to(device)
+                padding = prefix.unsqueeze(1).expand(args.norder, source.size()[1])
+            else:
+                padding = torch.ones(args.norder, source.size()[1], dtype=torch.long).to(device)*pad_id
+            data = torch.cat((padding, data), dim=0)
+            target = source[i:i+seq_len].view(-1) # predict first token as well
     else:
         seq_len = min(args.bptt, len(source) - 1 - i)
         data = source[i:i+seq_len]  # not predicting the first token in batch
